@@ -153,3 +153,70 @@ export interface VoiceAgentStatus {
   /** Human-readable explanation when configured === false. */
   reason?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Durable API DTOs
+// ---------------------------------------------------------------------------
+
+export interface CreatePreparationRequest {
+  contact_id?: string;
+  display_name: string;
+  phone_number?: string;
+  reddit_handle?: string;
+  consent_granted: boolean;
+  thread_context?: {
+    source: string;
+    title: string;
+    url: string;
+    body_excerpt?: string;
+    sent_reply?: string;
+  };
+  purpose: string;
+}
+
+export interface CreatePreparationResponse {
+  preparation_id: string;
+  confirmation_nonce: string;
+  system_prompt: string;
+  opening_line: string;
+  context_summary: string;
+}
+
+export interface ConfirmPreparationRequest {
+  operator_id: string;
+}
+
+export interface ConfirmPreparationResponse {
+  status: string;
+  preparation_id: string;
+}
+
+export interface CallPreparationRequest {
+  operator_id: string;
+  idempotency_key: string;
+}
+
+export interface CallPreparationResponse {
+  status: "queued" | "disabled" | "failed";
+  preparation_id: string;
+  attempt_id?: string;
+  provider_call_id?: string;
+  message: string;
+}
+
+export interface PreparationDetailResponse {
+  id: string;
+  status: string;
+  contact: { display_name: string; phone_number_masked?: string };
+  purpose: string;
+  created_at: string;
+}
+
+export interface CreateAgentRequest {
+  bootstrap_key: string;
+}
+
+export interface CreateAgentResponse {
+  agent_id?: string;
+  error?: string;
+}
