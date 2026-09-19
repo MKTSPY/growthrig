@@ -1,25 +1,52 @@
-// src/app/voice/page.tsx — Voice tab (server component)
-//
-// Human-in-the-loop: turn a thread reply into a consent-gated conversation
-// brief. Nothing dials itself. The operator must explicitly confirm consent
-// AND type a confirmation phrase before "Place confirmed call" enables.
-//
-// All contact / message state lives in the browser (localStorage) — not on
-// the server — so this component never calls listContacts() or listPreparations().
-// This is the correct design for Vercel serverless: in-memory globalThis state
-// is not shared across function instances.
 import { PageHead } from "@/components/ui/page-head";
 import { ContentCard, CardSection } from "@/components/ui/content-card";
 import { getVoiceAgentStatus } from "@/lib/voice";
+import { isVoicePersistenceAvailable } from "@/lib/db/voice-repository";
+import { getVoicePolicy } from "@/lib/voice/policy";
 import { VoiceWorkspace } from "./voice-workspace";
 
 export const dynamic = "force-dynamic";
 
-export default function VoicePage() {
-  const agentStatus = getVoiceAgentStatus();
+export interface VoiceStatus {
+  agentConfigured: boolean;
+  agentMode: "live" | "preview";
+  outboundEnabled: boolean;
+  persistenceAvailable: boolean;
+  operatorRequired: boolean;
+  prepMode: "durable" | "preview";
+  missing: string[];
+  reason?: string;
+}
 
-  const modeBadgeColor = agentStatus.mode === "live" ? "var(--ok, #22c55e)" : "var(--caution, #f59e0b)";
-  const modeBadgeBg = agentStatus.mode === "live" ? "var(--ok-soft, #dcfce7)" : "var(--caution-soft, #fef9c3)";
+export default function VoicePage() {
+  // Server-side aggregation of the same flags exposed by GET /api/voice, so
+  // the SSR'd page never mis-renders the live state.
+  const agentStatus = getVoiceAgentStatus();
+  const persistenceAvailable = isVoicePersistenceAvailable();
+  const policy = getVoicePolicy();
+  const missing: string[] = [];
+  if (!agentStatus.configured)
+    missing.push("ELEVENLABS_API_KEY + ELEVENLABS_AGENT_ID + ELEVENLABS_PHONE_NUMBER_ID");
+  if (!persistenceAvailable)
+    missing.push("SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY");
+  if (!policy.outboundEnabled) missing.push("VOICE_OUTBOUND_ENABLED=true");
+  const allGatesGreen =
+    agentStatus.configured && persistenceAvailable && policy.outboundEnabled;
+
+  const voiceStatus: VoiceStatus = {
+    agentConfigured: agentStatus.configured,
+    agentMode: agentStatus.mode,
+    outboundEnabled: policy.outboundEnabled,
+    persistenceAvailable,
+    operatorRequired: policy.operatorAuthRequired,
+    prepMode: allGatesGreen ? "durable" : "preview",
+    missing,
+    reason: !agentStatus.configured ? agentStatus.reason : undefined,
+  };
+
+  const bannerBg = voiceStatus.prepMode === "durable" ? "var(--ok-soft, #dcfce7)" : "var(--caution-soft, #fef9c3)";
+  const bannerBorder = voiceStatus.prepMode === "durable" ? "var(--ok, #22c55e)" : "var(--caution, #f59e0b)";
+  const badgeColor = voiceStatus.prepMode === "durable" ? "var(--ok, #22c55e)" : "var(--caution, #f59e0b)";
 
   return (
     <>
@@ -34,35 +61,45 @@ export default function VoicePage() {
               fontWeight: 700,
               textTransform: "uppercase",
               letterSpacing: "0.07em",
-              color: modeBadgeColor,
-              background: modeBadgeBg,
+              color: badgeColor,
+              background: bannerBg,
               borderRadius: 999,
               padding: "3px 10px",
               flexShrink: 0,
+              border: `1px solid ${bannerBorder}`,
             }}
           >
-            {agentStatus.mode === "live" ? "Live" : "Preview-only"}
+            {voiceStatus.prepMode === "durable" ? "Live" : "Preview-only"}
           </span>
         </div>
       </PageHead>
 
-      {/* Agent status card — shown honestly, never implied as configured when it isn't */}
-      {!agentStatus.configured && (
-        <div
-          style={{
-            margin: "0 0 16px",
-            padding: "12px 16px",
-            borderRadius: 10,
-            border: "1px solid var(--caution, #f59e0b)",
-            background: "var(--caution-soft, #fef9c3)",
-            fontSize: 13,
-            color: "var(--ink, #0f172a)",
-          }}
-        >
-          <strong>Preview mode</strong> — {agentStatus.reason ?? "Voice agent not fully configured."}{" "}
-          Call briefs are generated locally but no outbound calls will be placed.
-        </div>
-      )}
+      <div
+        style={{
+          margin: "0 0 16px",
+          padding: "12px 16px",
+          borderRadius: 10,
+          border: `1px solid ${bannerBorder}`,
+          background: bannerBg,
+          fontSize: 13,
+          color: "var(--ink, #0f172a)",
+        }}
+      >
+        {voiceStatus.prepMode === "durable" ? (
+          <>
+            <strong>Live calling available.</strong> All gates green. The browser still requires you to type the
+            confirmation phrase before any call is queued.
+          </>
+        ) : (
+          <>
+            <strong>Preview mode.</strong> The browser-local <em>Preview Brief</em> builder works, but durable live
+            calling requires: {voiceStatus.missing.join(", ")}.
+            {voiceStatus.reason && (
+              <span style={{ color: "var(--slate, #64748b)", marginLeft: 8 }}>({voiceStatus.reason})</span>
+            )}
+          </>
+        )}
+      </div>
 
       <ContentCard>
         <CardSection>How it works</CardSection>
@@ -79,15 +116,15 @@ export default function VoicePage() {
             </li>
           </ol>
           <p style={{ margin: "8px 0 0", fontSize: 12, color: "var(--slate, #64748b)" }}>
-            The server independently verifies consent and the confirmation phrase on every call request — a scripted
-            request without both returns <code>disabled</code>, never <code>queued</code>. All contact and context
-            data is browser-owned (localStorage); nothing is persisted server-side in this demo.
+            When live calling is enabled, every request goes through the durable prep/confirm/call flow with
+            server-side consent, single-use nonce, daily limit, and idempotency. A scripted request without all
+            gates returns <code>disabled</code>, never <code>queued</code>.
           </p>
         </div>
 
         <CardSection>Workspace</CardSection>
         <div style={{ padding: "12px 20px 20px" }}>
-          <VoiceWorkspace agentStatus={agentStatus} />
+          <VoiceWorkspace agentStatus={agentStatus} voiceStatus={voiceStatus} />
         </div>
       </ContentCard>
     </>

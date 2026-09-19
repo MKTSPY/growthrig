@@ -488,3 +488,10 @@ export async function startConfirmedCall(
     clearTimeout(timer);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Agent provisioning — thin re-export from create-agent.ts
+// ---------------------------------------------------------------------------
+
+export { createGrowthRigAgent, buildCreateAgentBody } from "./create-agent";
+export type { CreateAgentResult } from "./create-agent";

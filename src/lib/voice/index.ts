@@ -17,4 +17,8 @@ export {
   buildSystemPrompt,
   prepareVoiceBrief,
   startConfirmedCall,
+  createGrowthRigAgent,
+  buildCreateAgentBody,
 } from "./elevenlabs";
+
+export type { CreateAgentResult } from "./elevenlabs";

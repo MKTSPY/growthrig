@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { VoiceAgentStatus, VoiceCallRequest } from "@/lib/voice";
+import type { VoiceStatus } from "./page";
 
 // ---------------------------------------------------------------------------
 // Draft shape — everything the browser owns in localStorage
@@ -104,7 +105,13 @@ function colorFor(mode: VoiceAgentStatus["mode"]): string {
 // Main VoiceWorkspace (single unified component with tabbed sections)
 // ---------------------------------------------------------------------------
 
-export function VoiceWorkspace({ agentStatus }: { agentStatus: VoiceAgentStatus }) {
+export function VoiceWorkspace({
+  agentStatus,
+  voiceStatus,
+}: {
+  agentStatus: VoiceAgentStatus;
+  voiceStatus: VoiceStatus;
+}) {
   // ── Draft state — hydrated from localStorage on mount ──────────────────
   const [draft, setDraftRaw] = useState<VoiceDraft>(EMPTY_DRAFT);
   const [hydrated, setHydrated] = useState(false);
@@ -141,39 +148,129 @@ export function VoiceWorkspace({ agentStatus }: { agentStatus: VoiceAgentStatus 
   const [callResult, setCallResult] = useState<CallResult | null>(null);
   const [callError, setCallError] = useState<string | null>(null);
 
+  // ── Durable call state ─────────────────────────────────────────────────
+  const [operatorId, setOperatorId] = useState("");
+  const [preparationId, setPreparationId] = useState<string | null>(null);
+  const [confirmationNonce, setConfirmationNonce] = useState<string | null>(null);
+  const [callAttemptId, setCallAttemptId] = useState<string | null>(null);
+
   const expectedConfirm = draft.displayName ? `CALL ${draft.displayName}` : "";
+  const liveOk =
+    voiceStatus.persistenceAvailable &&
+    voiceStatus.agentConfigured &&
+    voiceStatus.outboundEnabled &&
+    (!voiceStatus.operatorRequired || operatorId.trim().length > 0);
   const canCall =
     consentChecked &&
     confirmInput === expectedConfirm &&
     !!prepResult &&
     !calling &&
-    !!draft.displayName;
+    !!draft.displayName &&
+    liveOk &&
+    !!preparationId;
 
-  // ── Section A: save contact (validation + echo, browser keeps canonical) ─
+  // ── Section A: create durable preparation (consent-gated server flow) ──
   async function handleSaveContact() {
     setContactError(null);
     setContactSaving(true);
     setContactSaved(false);
+    setPrepResult(null);
+    setCallResult(null);
+    setPreparationId(null);
+    setConfirmationNonce(null);
+    setCallAttemptId(null);
     try {
-      const res = await fetch("/api/voice/contact", {
+      const history =
+        draft.history.length > 0
+          ? draft.history
+          : [
+              draft.sentReply.trim()
+                ? { role: "agent" as const, content: draft.sentReply.trim(), at: new Date().toISOString() }
+                : null,
+              draft.theirResponse.trim()
+                ? { role: "contact" as const, content: draft.theirResponse.trim(), at: new Date().toISOString() }
+                : null,
+            ].filter(Boolean);
+
+      const payload = {
+        display_name: draft.displayName,
+        phone_number: draft.phone || undefined,
+        reddit_handle: draft.reddit || undefined,
+        consent_granted: draft.consentedToContact,
+        thread_context: {
+          source: draft.source,
+          title: draft.threadTitle,
+          url: draft.threadUrl,
+          body_excerpt: undefined,
+          sent_reply: draft.sentReply,
+        },
+        conversation_history: history,
+        purpose: draft.purpose,
+      };
+
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (operatorId.trim()) headers["x-growthrig-operator-id"] = operatorId.trim();
+
+      const res = await fetch("/api/voice/preparations", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "save",
-          id: draft.contactId || undefined,
-          display_name: draft.displayName,
-          phone_number: draft.phone || undefined,
-          reddit_handle: draft.reddit || undefined,
-          consent_to_contact: draft.consentedToContact,
-        }),
+        headers,
+        body: JSON.stringify(payload),
       });
-      const data = await res.json() as { contact?: { id: string }; error?: string };
-      if (!res.ok || !data.contact) {
-        setContactError(data.error ?? "Validation failed.");
+      const data = await res.json() as
+        | { preparation_id: string; confirmation_nonce: string; system_prompt: string; opening_line: string; context_summary: string }
+        | { error: string; missing?: string[] };
+      if (!res.ok || !("preparation_id" in data)) {
+        const reason =
+          ("error" in data && data.error) ||
+          "Failed to create preparation.";
+        setContactError(reason);
         return;
       }
-      // Update contactId in draft (server may have generated one).
-      setDraft({ contactId: data.contact.id });
+      setPreparationId(data.preparation_id);
+      setConfirmationNonce(data.confirmation_nonce);
+      // Mirror the brief locally so the existing "Opening line / System prompt" panels can keep rendering.
+      setPrepResult({
+        preparation: {
+          id: data.preparation_id,
+          purpose: draft.purpose,
+          status: "draft",
+          confirmation_text: `CALL ${draft.displayName}`,
+        },
+        brief: {
+          system_prompt: data.system_prompt,
+          opening_line: data.opening_line,
+          context_summary: data.context_summary,
+        },
+        // Carry the VoiceCallRequest shape the call route will need on confirm.
+        request: {
+          contact: {
+            id: draft.contactId,
+            display_name: draft.displayName,
+            phone_number: draft.phone || undefined,
+            reddit_handle: draft.reddit || undefined,
+            consent_to_contact: draft.consentedToContact,
+          },
+          context: {
+            company_name: "",
+            icp: "",
+            goal: "",
+            thread_title: draft.threadTitle,
+            thread_url: draft.threadUrl,
+            source: draft.source,
+            sent_reply: draft.sentReply,
+            conversation_history: history.map((h) => ({
+              role: h!.role,
+              content: h!.content,
+              at: h!.at,
+            })),
+            facts: [],
+            prohibited_claims: [],
+          },
+          channel: "phone",
+          purpose: draft.purpose,
+          confirmation_text: `CALL ${draft.displayName}`,
+        },
+      });
       setContactSaved(true);
     } catch (e) {
       setContactError(e instanceof Error ? e.message : "Unexpected error.");
@@ -256,27 +353,62 @@ export function VoiceWorkspace({ agentStatus }: { agentStatus: VoiceAgentStatus 
     }
   }
 
-  // ── Section C: place call ────────────────────────────────────────────────
+  // ── Section C: durable confirm + call (server-trusted flow) ──────────────
   async function handlePlaceCall() {
-    if (!prepResult || !canCall) return;
+    if (!prepResult || !canCall || !preparationId || !confirmationNonce) return;
     setCalling(true);
     setCallResult(null);
     setCallError(null);
     try {
-      const res = await fetch("/api/voice/call", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          request: prepResult.request,
-          confirmation_text: confirmInput,
-        }),
-      });
-      const data = await res.json() as { result?: CallResult; error?: string };
-      if (!res.ok) {
-        setCallError(data.error ?? "Server error.");
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (operatorId.trim()) headers["x-growthrig-operator-id"] = operatorId.trim();
+
+      // 1) Consume the nonce and confirm consent (server checks + atomically marks consumed).
+      const confirmRes = await fetch(
+        `/api/voice/preparations/${encodeURIComponent(preparationId)}/confirm`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            confirmation_text: confirmInput,
+            confirmation_nonce: confirmationNonce,
+          }),
+        },
+      );
+      const confirmData = await confirmRes.json() as { status?: string; error?: string };
+      if (!confirmRes.ok || confirmData.status !== "confirmed") {
+        setCallError(confirmData.error ?? "Confirmation failed.");
         return;
       }
-      if (data.result) setCallResult(data.result);
+
+      // 2) Queue the actual provider call (policy + consent + nonce already verified).
+      const callRes = await fetch(
+        `/api/voice/preparations/${encodeURIComponent(preparationId)}/call`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            idempotency_key: `${preparationId}-${Date.now()}`,
+          }),
+        },
+      );
+      const callData = await callRes.json() as
+        | { status: string; preparation_id: string; attempt_id?: string; provider_call_id?: string; message: string }
+        | { error: string };
+      if (!callRes.ok || !("status" in callData)) {
+        setCallError(("error" in callData && callData.error) || "Call dispatch failed.");
+        return;
+      }
+      setCallAttemptId(callData.attempt_id ?? null);
+      const validStatus: "queued" | "disabled" | "failed" =
+        callData.status === "queued" || callData.status === "disabled" || callData.status === "failed"
+          ? callData.status
+          : "failed";
+      setCallResult({
+        status: validStatus,
+        provider_call_id: callData.provider_call_id,
+        message: callData.message,
+      });
     } catch (e) {
       setCallError(e instanceof Error ? e.message : "Unexpected error.");
     } finally {
@@ -310,6 +442,75 @@ export function VoiceWorkspace({ agentStatus }: { agentStatus: VoiceAgentStatus 
         (localStorage key: <code>growthrig-voice-draft-v1</code>). They are not stored
         server-side — refresh to reload your draft.
       </p>
+
+      {/* ── Live calling status (honest gate) ─────────────────────────────── */}
+      {(() => {
+        const s = voiceStatus;
+        const reasons: string[] = [];
+        if (!s.persistenceAvailable) reasons.push("Voice persistence is unavailable (Supabase not configured).");
+        if (!s.agentConfigured) reasons.push("ElevenLabs agent is not configured (ELEVENLABS_AGENT_ID missing).");
+        if (!s.outboundEnabled) reasons.push("Outbound calling is disabled (VOICE_OUTBOUND_ENABLED is not true).");
+        if (s.operatorRequired && !operatorId.trim()) reasons.push("Operator ID not set. Enter a temporary operator ID below before live calling.");
+        const liveOk = s.persistenceAvailable && s.agentConfigured && s.outboundEnabled && (!s.operatorRequired || operatorId.trim().length > 0);
+
+        return (
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="voice-live-status"
+            style={{
+              border: `1px solid ${liveOk ? "var(--ok, #22c55e)" : "var(--caution, #f59e0b)"}`,
+              background: liveOk ? "var(--ok-soft, #dcfce7)" : "var(--caution-soft, #fef9c3)",
+              borderRadius: 10,
+              padding: "12px 14px",
+              marginBottom: 20,
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span
+                className={`dot ${liveOk ? "up" : "warn"}`}
+                style={{ width: 8, height: 8, borderRadius: 999 }}
+                aria-hidden="true"
+              />
+              <strong style={{ fontSize: 13, color: "var(--ink, #0f172a)" }}>
+                {liveOk ? "Live calling available" : "Live calling not yet enabled"}
+              </strong>
+              <span style={{ fontSize: 11.5, color: "var(--slate, #64748b)" }}>
+                Persistence: {s ? (s.persistenceAvailable ? "ok" : "missing") : "—"} ·
+                ElevenLabs agent: {s ? (s.agentConfigured ? "set" : "missing") : "—"} ·
+                Outbound flag: {s ? (s.outboundEnabled ? "on" : "off") : "—"} ·
+                Operator: {s ? (s.operatorRequired ? "required" : "not required") : "—"}
+              </span>
+            </div>
+            {!liveOk && reasons.length > 0 && (
+              <ul style={{ margin: "4px 0 0", paddingLeft: 18, fontSize: 12, color: "var(--ink, #0f172a)" }}>
+                {reasons.map((r, i) => (
+                  <li key={i}>{r}</li>
+                ))}
+              </ul>
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+              <label style={{ fontSize: 12, color: "var(--slate, #64748b)" }} htmlFor="voice-op-id">
+                Operator ID (temporary pre-auth):
+              </label>
+              <input
+                id="voice-op-id"
+                value={operatorId}
+                onChange={(e) => setOperatorId(e.target.value)}
+                placeholder="e.g. ops-mel"
+                style={{ ...inputStyle, maxWidth: 240 }}
+              />
+            </div>
+            <p style={{ margin: "2px 0 0", fontSize: 11.5, color: "var(--slate, #64748b)" }}>
+              Live calling requires Supabase, ElevenLabs agent, feature flag, and operator ID. The
+              browser-local <strong>Preview Brief</strong> below always works and never places a call.
+            </p>
+          </div>
+        );
+      })()}
 
       {/* ── Section A: Contact ────────────────────────────────────────────── */}
       <section style={{ marginBottom: 28 }}>

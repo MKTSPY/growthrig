@@ -113,3 +113,7 @@ Mel at `npm run build && npm run start`, respecting `PORT`.
   trade-off for a desktop-first internal tool, same as the system it's
   modeled on.
 - No auth — single demo session only, per PRD §5.
+
+## Voice Operations
+
+The Voice tab runs in browser-local preview mode by default. Durable outbound calling is feature-gated and requires Supabase, ElevenLabs credentials, an imported ElevenLabs phone-number ID, and a recorded consent flow. See [docs/VOICE_OPERATIONS.md](docs/VOICE_OPERATIONS.md) for setup, test-call, privacy, and rollback procedures.
